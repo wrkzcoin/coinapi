@@ -1,0 +1,17 @@
+[telegram]
+coin_name = "WOW"
+explorer_link = "https://wownero.0z.network/"
+token = "telegram:token"
+link = "https://t.me/wow_tipbot"
+min_tip = 0.0001
+max_tip = 5000
+min_withdraw = 1
+max_withdraw = 5000
+tx_fee = 0.0085
+chain_height = "N/A"
+
+[backend]
+url = "http://localhost:1111"
+api_key = "----"
+
+

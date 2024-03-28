@@ -1,0 +1,19 @@
+[mysql]
+host = "localhost"
+port = 3306
+user = "dbuser"
+password = "password"
+db = "dbname"
+
+[coinapi]
+api_bind = "127.0.0.1"
+api_port = 1111
+api_name = "NameIt"
+kv_prefix = "coinapi_"
+list_btc = ["BTC", "DOGE", "LTC"]
+list_bcn_xmr = ["XMR", "WOW", "XLA"]
+
+[log]
+discord_webhook_default = "webhook url for discord"
+
+
