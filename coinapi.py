@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Response, Header, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from contextlib import asynccontextmanager
+import secrets
 
 from pydantic import BaseModel
 import asyncio
@@ -38,6 +39,12 @@ app = FastAPI(
 config = load_config()
 pool = None
 api_ttlcache = TTLCache(maxsize=1024, ttl=10.0)
+
+## make random paymentid:
+def paymentid(length=None):
+    if length is None:
+        length = 32
+    return secrets.token_hex(length)
 
 def round_amount(amount: float, places: int):
     return math.floor(amount *10**places)/10**places
@@ -371,6 +378,36 @@ async def get_txes_address_coin_api(
         traceback.print_exc(file=sys.stdout)
     return []
 
+async def get_withdraws_address_coin_api(
+    coin_name: str, api_id: int, address: str = None, limit: int = 1000
+):
+    global pool
+    try:
+        await open_connection()
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                sql_addr = ""
+                data_rows = [api_id, coin_name]
+                if address is not None:
+                    sql_addr = " AND `withdraws`.`from_address`=%s"
+                    data_rows.append(address)
+                sql = """
+                SELECT `withdraws`.*, `deposit_addresses`.`tag`, `deposit_addresses`.`second_tag` FROM `withdraws` 
+                INNER JOIN  `deposit_addresses` ON `deposit_addresses`.`address`=`withdraws`.`from_address` 
+                WHERE `withdraws`.`api_id`=%s AND `withdraws`.`coin_name`=%s 
+                """ +sql_addr+ """
+                ORDER BY `withdraws`.`timestamp` DESC
+                LIMIT %s
+                """
+                data_rows.append(limit)
+                await cur.execute(sql, tuple(data_rows))
+                result = await cur.fetchall()
+                if result:
+                    return result
+    except Exception as e:
+        traceback.print_exc(file=sys.stdout)
+    return []
+
 async def insert_withdraw_success(
     api_id: int, coin_name: str, from_address: str, amount: float, fee_and_tax: float, from_deposit_id: int,
     to_address: str, txid: str, tx_key: str, remark: str, ref_uuid: str
@@ -415,6 +452,25 @@ async def xmr_make_integrate(
             async with session.post(url, json=json_data, headers=headers, timeout=15) as response:
                 if response.status == 200:
                     res_data = await response.read()
+                    return json.loads(res_data.decode('utf-8'))
+    except Exception:
+        traceback.print_exc(file=sys.stdout)
+    return None
+
+async def wrkz_make_integrate(
+    url: str, address: str, payment_id: str, key: str
+):
+    try:
+        headers = {
+            'X-API-KEY': key,
+            'Content-Type': 'application/json'
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url + "/addresses/{}/{}".format(address, payment_id), headers=headers, timeout=8) as response:
+                print(response)
+                if response.status == 200:
+                    res_data = await response.read()
+                    print(res_data)
                     return json.loads(res_data.decode('utf-8'))
     except Exception:
         traceback.print_exc(file=sys.stdout)
@@ -834,11 +890,11 @@ class BackgroundRunner:
     async def update_balance_tasks_xmr(self, coin_name: str, debug: bool):
         if debug is True:
             print_color(f"{datetime.now():%Y-%m-%d %H:%M:%S} Check balance {coin_name}", color="yellow")
-        gettopblock = await self.gettopblock(self.coin_list[coin_name]['daemon_address'], self.coin_list[coin_name]['type'], coin_name, time_out=60)
-        if gettopblock is None:
+        top_block = await self.gettopblock(self.coin_list[coin_name]['daemon_address'], self.coin_list[coin_name]['type'], coin_name, time_out=60)
+        if top_block is None:
             print_color(f"{datetime.now():%Y-%m-%d %H:%M:%S} Got None for top block {coin_name}", color="yellow")
             return
-        height = int(gettopblock['block_header']['height'])
+        height = int(top_block['block_header']['height'])
         try:
             set_cache_kv(
                 self.app_main,
@@ -925,6 +981,158 @@ class BackgroundRunner:
         if debug is True:
             print_color(f"{datetime.now():%Y-%m-%d %H:%M:%S} End check balance {coin_name}", color="green")
         return True
+
+    async def wrkz_api_get_transfers(
+        self, url: str, key: str,
+        height_start: int = None, height_end: int = None
+    ):
+        time_out = 30
+        method = "/transactions"
+        headers = {
+            'X-API-KEY': key,
+            'Content-Type': 'application/json'
+        }
+        if (height_start is None) or (height_end is None):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url + method, headers=headers, timeout=time_out) as response:
+                        json_resp = await response.json()
+                        if response.status == 200 or response.status == 201:
+                            return json_resp['transactions']
+            except Exception:
+                traceback.format_exc()
+        elif height_start and height_end:
+            method += '/' + str(height_start) + '/' + str(height_end)
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url + method, headers=headers, timeout=time_out) as response:
+                        json_resp = await response.json()
+                        if response.status == 200 or response.status == 201:
+                            return json_resp['transactions']
+            except Exception:
+                traceback.format_exc()
+
+    async def update_balance_tasks_wrkz(self, coin_name: str, debug: bool):
+        if debug is True:
+            print_color(f"{datetime.now():%Y-%m-%d %H:%M:%S} Check balance {coin_name}", color="yellow")
+        top_block = await self.gettopblock(self.coin_list[coin_name]['daemon_address'], self.coin_list[coin_name]['type'], coin_name, time_out=60)
+        if top_block is None:
+            print_color(f"{datetime.now():%Y-%m-%d %H:%M:%S} Got None for top block {coin_name}", color="yellow")
+            return
+        height = int(top_block['block_header']['height'])
+        try:
+            set_cache_kv(
+                self.app_main,
+                "block",
+                self.config['coinapi']['kv_prefix'] + coin_name,
+                height
+            )
+            await update_top_block(
+                coin_name, height
+            )
+        except Exception:
+            traceback.print_exc(file=sys.stdout)
+
+        get_confirm_depth = self.coin_list[coin_name]['confirmation_depth']
+        coin_decimal = self.coin_list[coin_name]['decimal']
+        min_deposit = self.coin_list[coin_name]['min_deposit']
+        get_min_deposit_amount = int(min_deposit * 10 ** coin_decimal)
+
+        get_transfers = await self.wrkz_api_get_transfers(
+            runner.coin_list[coin_name]['wallet_address'],
+            runner.coin_list[coin_name]['header'],
+            height - 2000,
+            height
+        )
+        list_balance_user = {}
+        if get_transfers and len(get_transfers) >= 1:
+            await self.open_connection()
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    sql = """
+                    SELECT * FROM `deposits` 
+                    WHERE `coin_name`=%s
+                    """
+                    await cur.execute(sql, (coin_name))
+                    result = await cur.fetchall()
+                    d = [i['txid'] for i in result]
+                    # print('=================='+coin_name+'===========')
+                    # print(d)
+                    # print('=================='+coin_name+'===========')
+                    for tx in get_transfers:
+                        # Could be one block has two or more tx with different payment ID
+                        # add to balance only confirmation depth meet
+                        if len(tx['transfers']) > 0 and height >= int(tx['blockHeight']) + get_confirm_depth and \
+                            tx['transfers'][0]['amount'] >= get_min_deposit_amount and 'paymentID' in tx:
+                            if 'paymentID' in tx and tx['paymentID'] in list_balance_user:
+                                if tx['transfers'][0]['amount'] > 0:
+                                    list_balance_user[tx['paymentID']] += tx['transfers'][0]['amount']
+                            elif 'paymentID' in tx and tx['paymentID'] not in list_balance_user:
+                                if tx['transfers'][0]['amount'] > 0:
+                                    list_balance_user[tx['paymentID']] = tx['transfers'][0]['amount']
+                            try:
+                                if tx['hash'] not in d:
+                                    address = None
+                                    for each_add in tx['transfers']:
+                                        if len(each_add['address']) > 0 and runner.coin_list[coin_name]['main_address'] == each_add['address']:
+                                            address = runner.coin_list[coin_name]['main_address']
+                                            break
+                                    if address is None:
+                                        continue
+                                    if 'paymentID' in tx and len(tx['paymentID']) > 0:
+                                        try:
+                                            user_paymentId = await self.get_userwallet_by_extra(
+                                                tx['paymentID'], coin_name,
+                                                self.coin_list[coin_name]['type']
+                                            )
+                                            app_id = None
+                                            if user_paymentId:
+                                                app_id = user_paymentId['api_id']
+                                            if app_id is None:
+                                                # Skipped for None
+                                                continue
+
+                                            sql = """
+                                            INSERT IGNORE INTO `deposits` 
+                                            (`coin_name`, `api_id`, `depost_id`, `txid`, `blockhash`, `address`, `extra`, `height`, `amount`, `confirmations`, `time_insert`) 
+                                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                            """
+                                            await cur.execute(sql, (
+                                                coin_name, app_id, user_paymentId['id'], tx['hash'], None, user_paymentId['address'], tx['paymentID'], tx['blockHeight'],
+                                                float(int(tx['transfers'][0]['amount']) / 10 ** coin_decimal), height - tx['blockHeight'], int(time.time())
+                                            ))
+                                            await conn.commit()
+                                            try:
+                                                await log_to_discord(
+                                                    "API: {} / ⏳ PENDING DEPOSIT {} {} to {}. Height: {}".format(app_id, float(int(tx['transfers'][0]['amount']) / 10 ** coin_decimal), coin_name, user_paymentId['address'], tx['blockHeight']),
+                                                    config['log']['discord_webhook_default']
+                                                )
+                                            except Exception:
+                                                traceback.print_exc(file=sys.stdout)
+                                        except Exception:
+                                            traceback.print_exc(file=sys.stdout)
+                            except Exception:
+                                traceback.print_exc(file=sys.stdout)
+        if debug is True:
+            print_color(f"{datetime.now():%Y-%m-%d %H:%M:%S} End check balance {coin_name}", color="green")
+        return True
+
+    async def update_balance_wrkz(self, timer: float=10.0):
+        while True:
+            try:
+                if len(config['coinapi']['list_wrkz_api']) > 0:
+                    tasks = []
+                    for coin_name in config['coinapi']['list_wrkz_api']:
+                        if runner.coin_list.get(coin_name) is not None:
+                            tasks.append(self.update_balance_tasks_wrkz(coin_name, False))
+                    completed = 0
+                    for task in asyncio.as_completed(tasks):
+                        fetch_updates = await task
+                        if fetch_updates is True:
+                            completed += 1
+            except Exception:
+                traceback.print_exc(file=sys.stdout)
+            await asyncio.sleep(timer)
 
     async def update_balance_btc(self, timer: float=10.0):
         while True:
@@ -1129,9 +1337,45 @@ async def app_startup():
         print("Loading {} address(es).".format(len(runner.addresses)))
     asyncio.create_task(runner.update_balance_btc(timer=10.0))
     asyncio.create_task(runner.update_balance_xmr(timer=10.0))
+    asyncio.create_task(runner.update_balance_wrkz(timer=10.0))
     asyncio.create_task(runner.unlock_deposit(timer=10.0))
     asyncio.create_task(runner.bg_reload_coin_settings(timer=10.0))
 # End of background
+
+@app.get("/reload", include_in_schema=False)
+async def reload_configuration(
+    request: Request, Authorization: Union[str, None] = Header(default=None)
+):
+    """
+    Master to reload configuration on the fly without restarting
+    """
+    if 'Authorization' not in request.headers:
+        return {
+            "success": False,
+            "data": None,
+            "message": "This is not where you need to do!",
+            "time": int(time.time())
+        }
+    else:
+        # let's reload
+        config = load_config()
+        # get who own that key
+        if request.headers['Authorization'] != config['coinapi']['master_key']:
+            return {
+                "success": False,
+                "data": None,
+                "message": "Wrong API key!",
+                "time": int(time.time())
+            }
+        else:
+            print_color(f"{datetime.now():%Y-%m-%d %H:%M:%S} reloaded configuration done!", color="yellow")
+            try:
+                await log_to_discord(
+                    "Configuration reloaded",
+                    config['log']['discord_webhook_default']
+                )
+            except Exception:
+                traceback.print_exc(file=sys.stdout)
 
 @app.get("/status/{coin_name}")
 async def system_and_status(
@@ -1193,7 +1437,7 @@ async def status(
 ) -> Dict:
     return {
         "success": True,
-        "data": [i for i in config['coinapi']['list_btc'] + config['coinapi']['list_bcn_xmr'] if runner.coin_list.get(i) is not None],
+        "data": [i for i in config['coinapi']['list_btc'] + config['coinapi']['list_bcn_xmr'] + config['coinapi']['list_wrkz_api'] if runner.coin_list.get(i) is not None],
         "message": None,
         "time": int(time.time())
     }
@@ -1306,6 +1550,7 @@ async def create_new_coin_address(
                         "success": True,
                         "data": find_tag['address'],
                         "message": f"Tag: '{tag}' already exist for coin {coin_name} within your API.",
+                        "second_tag": find_tag['second_tag'],
                         "time": int(time.time())
                     }
                     # if second_tag is None, and there is second_tag
@@ -1320,7 +1565,59 @@ async def create_new_coin_address(
                         traceback.print_exc(file=sys.stdout) 
                     return result_data
 
-        if coin_name in config['coinapi']['list_bcn_xmr']:
+        if coin_name in config['coinapi']['list_wrkz_api']:
+            payment_id = paymentid()
+            make_addr = await wrkz_make_integrate(
+                runner.coin_list[coin_name]['wallet_address'],
+                runner.coin_list[coin_name]['main_address'],
+                payment_id,
+                runner.coin_list[coin_name]['header']    
+            )
+            if make_addr is None:
+                failed_result = {
+                    "success": False,
+                    "data": None,
+                    "message": "internal error.",
+                    "time": int(time.time())
+                }
+                try:
+                    await insert_api_failed_log(get_api['id'], method_call, str(item), json.dumps(failed_result))
+                except Exception:
+                    traceback.print_exc(file=sys.stdout) 
+                return failed_result
+            else:
+                inserting = await insert_address(
+                    get_api['id'], coin_name, make_addr['integratedAddress'],
+                    payment_id, None, tag
+                )
+                if inserting is not None:
+                    collect_address = await get_coin_deposits()
+                    if collect_address:
+                        runner.addresses = collect_address['addresses']
+                        runner.by_key = collect_address['by_key']
+                        print("Reloading {} address(es).".format(len(runner.addresses)))
+                    data_call = json.dumps({"coin": coin_name, "tag": item.tag})
+                    result_data = {
+                        "success": True,
+                        "data": make_addr['integratedAddress'],
+                        "message": None,
+                        "time": int(time.time())
+                    }
+                    await insert_api_log(get_api['id'], method_call, data_call, json.dumps(result_data))
+                    return result_data
+                else:
+                    failed_result = {
+                        "success": False,
+                        "data": None,
+                        "message": "internal error during inserting to DB.",
+                        "time": int(time.time())
+                    }
+                    try:
+                        await insert_api_failed_log(get_api['id'], method_call, str(item), json.dumps(failed_result))
+                    except Exception:
+                        traceback.print_exc(file=sys.stdout) 
+                    return failed_result
+        elif coin_name in config['coinapi']['list_bcn_xmr']:
             make_addr = await xmr_make_integrate(
                 runner.coin_list[coin_name]['wallet_address'],
                 runner.coin_list[coin_name]['main_address']
@@ -1707,7 +2004,7 @@ async def withdraw_coin(
                                 header = runner.coin_list[coin_name]['header']
                                 is_fee_per_byte = runner.coin_list[coin_name]['is_fee_per_byte']
                                 main_address = runner.coin_list[coin_name]['main_address']
-                                if coin_name in config['coinapi']['list_bcn_xmr']:
+                                if coin_name in config['coinapi']['list_bcn_xmr'] + config['coinapi']['list_wrkz_api']:
                                     sending_tx = await send_external_xmr(
                                         runner, runner.coin_list[coin_name]['type'], main_address, amount, to_address, coin_name,
                                         runner.coin_list[coin_name]['decimal'], tx_fee, is_fee_per_byte, mixin, wallet_address, header
@@ -2304,6 +2601,216 @@ async def list_transactions_coin(
                         "second_tag": i['second_tag'],
                         "noted": i['already_noted'],
                         "noted_time": i['noted_time']
+                        } for i in get_txes
+                    ],
+                    "message": None,
+                    "time": int(time.time())
+                }
+                await insert_api_log(get_api['id'], method_call, data_call, json.dumps(result_data))
+                return result_data
+
+@app.get("/list_withdraws/{coin_name}/{address}")
+async def list_withdraws(
+    request: Request, coin_name: str, address: str, Authorization: Union[str, None] = Header(default=None)
+):
+    """
+    Get list of withdraws for a coin, address
+
+    coin_name: coin name
+    address: address of deposited coin
+    """
+    method_call = "/list_withdraws/"
+    coin_name = coin_name.upper()
+    if runner.coin_list is None or len(runner.coin_list) == 0:
+        return {
+            "success": False,
+            "data": None,
+            "message": "internal error.",
+            "time": int(time.time())
+        }
+    if coin_name not in runner.coin_list.keys():
+        return {
+            "success": False,
+            "data": None,
+            "message": "coin {} not in the supported list!".format(coin_name),
+            "time": int(time.time())
+        }
+    else:
+        if 'Authorization' not in request.headers:
+            return {
+                "success": False,
+                "data": None,
+                "message": "You need Authorization key in header!",
+                "time": int(time.time())
+            }
+        else:
+            # get who own that key
+            get_api = await get_api_by_key(request.headers['Authorization'])
+            if get_api is None:
+                return {
+                    "success": False,
+                    "data": None,
+                    "message": "Wrong API key!",
+                    "time": int(time.time())
+                }
+            elif get_api['is_suspended'] != 0:
+                return {
+                    "success": False,
+                    "data": None,
+                    "message": "We suspended your API key, please contact us!",
+                    "time": int(time.time())
+                }
+
+            data_call = json.dumps({"coin_name": coin_name, "api_id": get_api['id'], "address": address})
+            # check if that API can use that coin
+            if coin_name not in get_api['allowed_coin'].replace(" ","").split(","):
+                failed_result = {
+                    "success": False,
+                    "data": None,
+                    "message": f"Your API is limited to these coins: {get_api['allowed_coin']}! If you need, please request additional access.",
+                    "time": int(time.time())
+                }
+                try:
+                    await insert_api_failed_log(get_api['id'], method_call, data_call, json.dumps(failed_result))
+                except Exception:
+                    traceback.print_exc(file=sys.stdout) 
+                return failed_result
+
+            if address not in runner.addresses:
+                failed_result = {
+                    "success": False,
+                    "data": None,
+                    "message": "{}, address: {} not within your API.".format(coin_name, address),
+                    "time": int(time.time())
+                }
+                data_call = {"coin_name": coin_name, "address": address}
+                try:
+                    await insert_api_failed_log(get_api['id'], method_call, json.dumps(data_call), json.dumps(failed_result))
+                except Exception:
+                    traceback.print_exc(file=sys.stdout) 
+                return failed_result
+            else:
+                get_txes = await get_withdraws_address_coin_api(
+                    coin_name, get_api['id'], address, 500
+                )
+                
+                if len(get_txes) == 0:
+                    result_data = {
+                        "success": True,
+                        "data": [],
+                        "message": "no transactions.",
+                        "time": int(time.time())
+                    }
+                    await insert_api_log(get_api['id'], method_call, data_call, json.dumps(result_data))
+                    return result_data
+                else:
+                    result_data = {
+                        "success": True,
+                        "data": [{
+                            "coin_name": coin_name,
+                            "txid": i['txid'],
+                            "amount": i['amount'],
+                            "to_address": i['to_address'],
+                            "time": i['timestamp'],
+                            "tag": i['tag'],
+                            "second_tag": i['second_tag']
+                            } for i in get_txes
+                        ],
+                        "message": None,
+                        "time": int(time.time())
+                    }
+                    await insert_api_log(get_api['id'], method_call, data_call, json.dumps(result_data))
+                    return result_data
+
+@app.get("/list_withdraws/{coin_name}")
+async def list_withdraws_coin(
+    request: Request, coin_name: str, Authorization: Union[str, None] = Header(default=None)
+):
+    """
+    Get list of withdraws for a coin, address
+
+    coin_name: coin name
+    """
+    method_call = "/list_withdraws/"
+    coin_name = coin_name.upper()
+    if runner.coin_list is None or len(runner.coin_list) == 0:
+        return {
+            "success": False,
+            "data": None,
+            "message": "internal error.",
+            "time": int(time.time())
+        }
+    if coin_name not in runner.coin_list.keys():
+        return {
+            "success": False,
+            "data": None,
+            "message": "coin {} not in the supported list!".format(coin_name),
+            "time": int(time.time())
+        }
+    else:
+        if 'Authorization' not in request.headers:
+            return {
+                "success": False,
+                "data": None,
+                "message": "You need Authorization key in header!",
+                "time": int(time.time())
+            }
+        else:
+            # get who own that key
+            get_api = await get_api_by_key(request.headers['Authorization'])
+            if get_api is None:
+                return {
+                    "success": False,
+                    "data": None,
+                    "message": "Wrong API key!",
+                    "time": int(time.time())
+                }
+            elif get_api['is_suspended'] != 0:
+                return {
+                    "success": False,
+                    "data": None,
+                    "message": "We suspended your API key, please contact us!",
+                    "time": int(time.time())
+                }
+
+            data_call = json.dumps({"coin_name": coin_name, "api_id": get_api['id']})
+            # check if that API can use that coin
+            if coin_name not in get_api['allowed_coin'].replace(" ","").split(","):
+                failed_result = {
+                    "success": False,
+                    "data": None,
+                    "message": f"Your API is limited to these coins: {get_api['allowed_coin']}! If you need, please request additional access.",
+                    "time": int(time.time())
+                }
+                try:
+                    await insert_api_failed_log(get_api['id'], method_call, data_call, json.dumps(failed_result))
+                except Exception:
+                    traceback.print_exc(file=sys.stdout) 
+                return failed_result
+
+            get_txes = await get_withdraws_address_coin_api(
+                coin_name, get_api['id'], None, 500
+            )
+            if len(get_txes) == 0:
+                result_data = {
+                    "success": True,
+                    "data": [],
+                    "message": "no transactions.",
+                    "time": int(time.time())
+                }
+                await insert_api_log(get_api['id'], method_call, data_call, json.dumps(result_data))
+                return result_data
+            else:
+                result_data = {
+                    "success": True,
+                    "data": [{
+                        "coin_name": coin_name,
+                        "txid": i['txid'],
+                        "amount": i['amount'],
+                        "to_address": i['to_address'],
+                        "time": i['timestamp'],
+                        "tag": i['tag'],
+                        "second_tag": i['second_tag']
                         } for i in get_txes
                     ],
                     "message": None,

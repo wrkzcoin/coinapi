@@ -185,6 +185,54 @@ async def list_address_coins(
         traceback.print_exc(file=sys.stdout)
     return None
 
+async def list_deposit_tx_coin(
+    address: str, coin_name: str, timeout: int = 30
+):
+    try:
+        headers = {
+            'Authorization': config['backend']['api_key'],
+            'Content-Type': 'application/json',
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                config['backend']['url'] + "/list_transactions/" + coin_name + "/" + address,
+                headers=headers,
+                timeout=timeout
+            ) as response:
+                res_data = await response.read()
+                res_data = res_data.decode('utf-8')
+                await session.close()
+                decoded_data = json.loads(res_data)
+                if decoded_data['success'] is True:
+                    return decoded_data
+    except Exception:
+        traceback.print_exc(file=sys.stdout)
+    return None
+
+async def list_withdraws_coin(
+    address: str, coin_name: str, timeout: int = 30
+):
+    try:
+        headers = {
+            'Authorization': config['backend']['api_key'],
+            'Content-Type': 'application/json',
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                config['backend']['url'] + "/list_withdraws/" + coin_name + "/" + address,
+                headers=headers,
+                timeout=timeout
+            ) as response:
+                res_data = await response.read()
+                res_data = res_data.decode('utf-8')
+                await session.close()
+                decoded_data = json.loads(res_data)
+                if decoded_data['success'] is True:
+                    return decoded_data
+    except Exception:
+        traceback.print_exc(file=sys.stdout)
+    return None
+
 async def noted_tx(
     coin_name: str, tx: str, timeout: int = 30
 ):
@@ -243,7 +291,9 @@ async def command_start_handler(message: Message) -> None:
     # default row_width is 3, so here we can omit it actually
     # kept for clearness
     await message.reply(
-        "Hello, Welcome to Wownero TipBot!\nAvailable command: /balance, /withdraw, /tip, /deposit, /about"
+        f"Hello {message.from_user.mention_html()}, Welcome to {config['telegram']['coin_full_name']} TipBot!\n"\
+            "Available command: /balance, /withdraw, /tip, /deposit, /coininfo, /withdraws, /deposits\n",
+        parse_mode=ParseMode.HTML
     )
 
 @dp.message(Command("deposit"))
@@ -252,13 +302,13 @@ async def send_deposit(message: types.Message):
     This handler will be called when user sends `/deposit`
     """
     if message.chat.type != "private":
-        reply_text = "Please do via direct message with me!"
-        await message.reply(reply_text)
+        reply_text = f"{message.from_user.mention_html()}, please do via direct message with me!"
+        await message.reply(reply_text, parse_mode=ParseMode.HTML)
         return
 
     if message.from_user.username is None:
-        reply_text = "I can not get your username. Please set!"
-        await message.reply(reply_text)
+        reply_text = f"{message.from_user.mention_html()}, I can not get your username. Please set!"
+        await message.reply(reply_text, parse_mode=ParseMode.HTML)
         return
     
     get_address = await create_address(
@@ -278,13 +328,13 @@ async def send_balance(message: types.Message):
     This handler will be called when user sends `/balance`
     """
     if message.chat.type != "private":
-        reply_text = "Please do via direct message with me!"
-        await message.reply(reply_text)
+        reply_text = f"{message.from_user.mention_html()}, please do via direct message with me!"
+        await message.reply(reply_text, parse_mode=ParseMode.HTML)
         return
 
     if message.from_user.username is None:
-        reply_text = "I can not get your username. Please set!"
-        await message.reply(reply_text)
+        reply_text = f"{message.from_user.mention_html()}, I can not get your username. Please set!"
+        await message.reply(reply_text, parse_mode=ParseMode.HTML)
         return
 
     get_address = await create_address(
@@ -302,8 +352,9 @@ async def send_balance(message: types.Message):
         )
         await message.reply(message_text, parse_mode=ParseMode.MARKDOWN_V2)
     else:
-        message_text = text(bold("Internal error for /balance command. Please report."))
-
+        reply_text = f"{message.from_user.mention_html()}, internal error for /balance command. Please report."
+        await message.reply(reply_text, parse_mode=ParseMode.HTML)
+        return
 
 @dp.message(Command("tip"))
 async def send_tip(message: types.Message):
@@ -311,8 +362,8 @@ async def send_tip(message: types.Message):
     This handler will be called when user sends `/tip <someone> <amount>`
     """
     if message.from_user.username is None:
-        reply_text = "I can not get your username. Please set!"
-        await message.reply(reply_text)
+        reply_text = f"{message.from_user.mention_html()}, I can not get your username. Please set!"
+        await message.reply(reply_text, parse_mode=ParseMode.HTML)
         return
 
     user_to = None
@@ -322,6 +373,7 @@ async def send_tip(message: types.Message):
 
     # Multiple receiers
     receivers = []
+    receiver_ids = []
     receiver_addresses = []
     no_wallet_receivers = []
     last_receiver = ""
@@ -349,10 +401,12 @@ async def send_tip(message: types.Message):
                             get_each_user = await create_address(
                                 config['telegram']['coin_name'], "{}@{}".format(tg_user, SERVER_BOT), None, 8
                             )
-                            if get_each_user is None and tg_user.lower() != "wow_tipbot":
+                            if get_each_user is None and tg_user.lower() != config['telegram']['bot_name']:
                                 no_wallet_receivers.append(tg_user)
-                            elif tg_user.lower() == "wow_tipbot" or get_each_user is not None:
+                            elif tg_user.lower() == config['telegram']['bot_name'] or get_each_user is not None:
                                 receivers.append(tg_user)
+                                if get_each_user.get('second_tag'):
+                                    receiver_ids.append(get_each_user['second_tag'])
                                 receiver_addresses.append(get_each_user['data'])
 
         # Check if reply to
@@ -368,7 +422,7 @@ async def send_tip(message: types.Message):
             receiver_addresses.remove(get_tipper['data'])
 
         if len(receiver_addresses) == 0:
-            message_text = text(bold('ERROR:'), markdown.pre("There is no one tip to."))
+            message_text = text(bold('ERROR:'), f"{message.from_user.mention_html()}, there is no one tip to.")
             if len(no_wallet_receivers) > 0:
                 message_text += text(bold('USER NO WALLET:'), markdown.pre("{}".format(", ".join(no_wallet_receivers))))
             await message.reply(message_text, parse_mode=ParseMode.MARKDOWN_V2)
@@ -382,8 +436,8 @@ async def send_tip(message: types.Message):
             send_all = False
             amount = args[1].replace(",", "")    
             if get_tipper is None:
-                message_text = text(bold('ERROR:'), markdown.pre("Internal error, please report!"))
-                await message.reply(message_text, parse_mode=ParseMode.MARKDOWN_V2)
+                message_text = f"{message.from_user.mention_html()}, internal error, please report!"
+                await message.reply(message_text, parse_mode=ParseMode.HTML)
                 return
 
             min_tx = config['telegram']['min_tip']
@@ -400,32 +454,32 @@ async def send_tip(message: types.Message):
             try:
                 amount = float(amount)
             except ValueError:
-                message_text = text(bold('ERROR:'), markdown.pre("Invalid amount."))
-                await message.reply(message_text, parse_mode=ParseMode.MARKDOWN_V2)
+                message_text = f"{message.from_user.mention_html()}, invalid amount."
+                await message.reply(message_text, parse_mode=ParseMode.HTML)
                 return 
 
             if actual_balance <= 0:
-                message_text = text(bold('ERROR:'), markdown.pre(f"Please check your {config['telegram']['coin_name']} balance."))
-                await message.reply(message_text, parse_mode=ParseMode.MARKDOWN_V2)
+                message_text = f"{message.from_user.mention_html()}, please check your {config['telegram']['coin_name']} balance."
+                await message.reply(message_text, parse_mode=ParseMode.HTML)
                 # log_invalid_transfer
                 return
 
             if amount < 0:
-                message_text = text(bold('ERROR:'), markdown.pre(f"Invalid {config['telegram']['coin_name']} amount"))
-                await message.reply(message_text, parse_mode=ParseMode.MARKDOWN_V2)
+                message_text = f"{message.from_user.mention_html()}, invalid {config['telegram']['coin_name']} amount."
+                await message.reply(message_text, parse_mode=ParseMode.HTML)
                 return
             elif amount*len(receiver_addresses) > actual_balance:
-                message_text = text(bold('ERROR:'), markdown.pre(f"Insufficient balance to tip out {round_amount(amount)} {config['telegram']['coin_name']}. Having {round_amount(actual_balance)} {config['telegram']['coin_name']}."))
-                await message.reply(message_text, parse_mode=ParseMode.MARKDOWN_V2)
+                message_text = f"{message.from_user.mention_html()}, insufficient balance to tip out {round_amount(amount)} {config['telegram']['coin_name']}. Having {round_amount(actual_balance)} {config['telegram']['coin_name']}."
+                await message.reply(message_text, parse_mode=ParseMode.HTML)
                 #log_invalid_transfer
                 return
             elif amount < min_tx and send_all == False:
-                message_text = text(bold('ERROR:'), markdown.pre(f"Tipping cannot be smaller than {round_amount(min_tx)} {config['telegram']['coin_name']}"))
-                await message.reply(message_text, parse_mode=ParseMode.MARKDOWN_V2)
+                message_text = f"{message.from_user.mention_html()}, tipping cannot be smaller than {round_amount(min_tx)} {config['telegram']['coin_name']}." 
+                await message.reply(message_text, parse_mode=ParseMode.HTML)
                 return
             elif amount > max_tx:
-                message_text = text(bold('ERROR:'), markdown.pre(f"Tipping cannot be bigger than {round_amount(max_tx)} {config['telegram']['coin_name']}"))
-                await message.reply(message_text, parse_mode=ParseMode.MARKDOWN_V2)
+                message_text = f"{message.from_user.mention_html()}, tipping cannot be bigger than {round_amount(max_tx)} {config['telegram']['coin_name']}."
+                await message.reply(message_text, parse_mode=ParseMode.HTML)
                 return
             # OK we can tip
             if message.from_user.username not in TX_IN_PROCESS:
@@ -456,28 +510,30 @@ async def send_tip(message: types.Message):
                         if len(extra_message) > 0:
                             message_text += text(bold('MEMO:'),
                                                  markdown.pre(extra_message))
-                        to_message_text = text(bold(f"TIP RECEIVED: "), markdown.pre("{}".format(message.from_user.username)), markdown.pre("Amount: {} {}".format(round_amount(amount), config['telegram']['coin_name'])))
+                        to_message_text = text(bold(f"TIP RECEIVED FROM: "), markdown.pre("@{}".format(message.from_user.username)), markdown.pre("Amount: {} {}".format(round_amount(amount), config['telegram']['coin_name'])))
                         if len(extra_message) > 0:
                             to_message_text += text(bold('MEMO:'),
                                                     markdown.pre(extra_message))
                         await message.reply(message_text, parse_mode=ParseMode.MARKDOWN_V2)
-                        for each_user in receivers:
-                            try:
-                                if each_user.lower() == "wow_tipbot":
-                                    await logchanbot(f"[{SERVER_BOT}] A user tipped {round_amount(amount)} {config['telegram']['coin_name']} to {each_user}")
-                                else:
-                                    operator = Bot(API_TOKEN)
-                                    await operator.send_message(chat_id=each_user, text=to_message_text, parse_mode=ParseMode.MARKDOWN_V2)
-                            except Exception as e:
-                                await logchanbot(traceback.print_exc(file=sys.stdout))
+                        receiver_ids = list(set(receiver_ids))
+                        if len(receiver_ids) > 0:
+                            for each_user in receiver_ids:
+                                try:
+                                    if each_user.lower() == config['telegram']['bot_name']:
+                                        await logchanbot(f"[{SERVER_BOT}] A user tipped {round_amount(amount)} {config['telegram']['coin_name']} to {each_user}")
+                                    else:
+                                        await bot.send_message(chat_id=each_user, text=to_message_text, parse_mode=ParseMode.MARKDOWN_V2)
+                                        print(f"Tip from {message.from_user.username} -> {str(each_user)} - {round_amount(amount)} {config['telegram']['coin_name']}.")
+                                except Exception as e:
+                                    await logchanbot(traceback.print_exc(file=sys.stdout))
                 except Exception as e:
                     traceback.print_exc(file=sys.stdout)
                     await logchanbot(traceback.format_exc())
                 TX_IN_PROCESS.remove(message.from_user.username)
             else:
                 # reject and tell to wait
-                message_text = text(bold('ERROR:'), markdown.pre('You have another tx in process. Please wait it to finish'))
-                await message.reply(message_text, parse_mode=ParseMode.MARKDOWN_V2)
+                message_text = f"{message.from_user.mention_html()}, you have another tx in process. Please wait it to finish."
+                await message.reply(message_text, parse_mode=ParseMode.HTML)
     except Exception as e:
         traceback.print_exc(file=sys.stdout)
 
@@ -486,14 +542,15 @@ async def send_withdraw(message: types.Message):
     """
     This handler will be called when user sends `/withdraw <amount> <address>`
     """
-    if message.from_user.username is None:
-        message_text = text(bold('ERROR:'), markdown.pre("I can not get your username. Please set!"))
-        await message.reply(message_text, parse_mode=ParseMode.MARKDOWN_V2)
-        return
 
     if message.chat.type != "private":
-        reply_text = "Please do via direct message with me!"
-        await message.reply(reply_text)
+        reply_text = f"{message.from_user.mention_html()}, please do via direct message with me!"
+        await message.reply(reply_text, parse_mode=ParseMode.HTML)
+        return
+
+    if message.from_user.username is None:
+        reply_text = f"{message.from_user.mention_html()}, I can not get your username. Please set!"
+        await message.reply(reply_text, parse_mode=ParseMode.HTML)
         return
 
     send_all = False
@@ -584,9 +641,91 @@ async def send_withdraw(message: types.Message):
         TX_IN_PROCESS.remove(message.from_user.username)
     else:
         # reject and tell to wait
-        message_text = text(bold('ERROR:'), markdown.pre('You have another tx in process. Please wait it to finish'))
-        await message.reply(message_text, parse_mode=ParseMode.MARKDOWN_V2)
+        message_text = f"{message.from_user.mention_html()}, you have another tx in process. Please wait it to finish."
+        await message.reply(message_text, parse_mode=ParseMode.HTML)
         return
+
+@dp.message(Command("withdraws"))
+async def send_withdraw_list(message: types.Message):
+    """
+    This handler will be called when user sends `/withdraws`
+    """
+    if message.chat.type != "private":
+        reply_text = f"{message.from_user.mention_html()}, please do via direct message with me!"
+        await message.reply(reply_text, parse_mode=ParseMode.HTML)
+        return
+
+    if message.from_user.username is None:
+        reply_text = f"{message.from_user.mention_html()}, I can not get your username. Please set!"
+        await message.reply(reply_text, parse_mode=ParseMode.HTML)
+        return
+    
+    get_address = await create_address(
+        config['telegram']['coin_name'], "{}@{}".format(message.from_user.username, SERVER_BOT), str(message.chat.id), 8
+    )
+    if get_address is not None:
+        list_withdraws = await list_withdraws_coin(get_address['data'], config['telegram']['coin_name'], 30)
+        if list_withdraws is None:
+            message_text = text(bold('ERROR:'), markdown.pre("Internal error, please report!"))
+            await message.reply(message_text, parse_mode=ParseMode.MARKDOWN_V2)
+            return
+        else:
+            if len(list_withdraws) == 0:
+                message_text = text(bold('INFO:'), markdown.pre("You don't have withdraw history!"))
+                await message.reply(message_text, parse_mode=ParseMode.MARKDOWN_V2)
+                return
+            else:
+                list_tx = []
+                for ea in list_withdraws['data']:
+                    list_tx.append("{} {} - tx: {}".format(
+                        ea['amount'], ea['coin_name'], ea['txid']
+                    ))
+                message_text = text(
+                    markdown.bold(f"LIST {config['telegram']['coin_name']} WITHDRAWS:\n") + \
+                    markdown.pre("\n".join(list_tx))
+                )
+                await message.reply(message_text, parse_mode=ParseMode.MARKDOWN_V2, disable_web_page_preview=True)
+
+@dp.message(Command("deposits"))
+async def send_deposit_list(message: types.Message):
+    """
+    This handler will be called when user sends `/deposits`
+    """
+    if message.chat.type != "private":
+        reply_text = f"{message.from_user.mention_html()}, please do via direct message with me!"
+        await message.reply(reply_text, parse_mode=ParseMode.HTML)
+        return
+
+    if message.from_user.username is None:
+        reply_text = f"{message.from_user.mention_html()}, I can not get your username. Please set!"
+        await message.reply(reply_text, parse_mode=ParseMode.HTML)
+        return
+    
+    get_address = await create_address(
+        config['telegram']['coin_name'], "{}@{}".format(message.from_user.username, SERVER_BOT), str(message.chat.id), 8
+    )
+    if get_address is not None:
+        list_withdraws = await list_deposit_tx_coin(get_address['data'], config['telegram']['coin_name'], 30)
+        if list_withdraws is None:
+            message_text = text(bold('ERROR:'), markdown.pre("Internal error, please report!"))
+            await message.reply(message_text, parse_mode=ParseMode.MARKDOWN_V2)
+            return
+        else:
+            if len(list_withdraws) == 0:
+                message_text = text(bold('INFO:'), markdown.pre("You don't have withdraw history!"))
+                await message.reply(message_text, parse_mode=ParseMode.MARKDOWN_V2)
+                return
+            else:
+                list_tx = []
+                for ea in list_withdraws['data']:
+                    list_tx.append("{} {} - tx: {}".format(
+                        ea['amount'], ea['coin_name'], ea['txid']
+                    ))
+                message_text = text(
+                    markdown.bold(f"LIST {config['telegram']['coin_name']} DEPOSITS:\n") + \
+                    markdown.pre("\n".join(list_tx))
+                )
+                await message.reply(message_text, parse_mode=ParseMode.MARKDOWN_V2, disable_web_page_preview=True)
 
 @dp.message(Command("coininfo"))
 async def send_coininfo(message: types.Message):
