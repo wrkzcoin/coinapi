@@ -211,6 +211,39 @@ async def transfer_records(
         traceback.print_exc(file=sys.stdout)
     return False
 
+async def insert_hold_address(coin_name: str, api_id: int, deposit_id: int, address: str, amount: float, time_expiring: int, purpose: str):
+    global pool
+    try:
+        await open_connection()
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                sql = """
+                INSERT INTO `balance_holds` (`coin_name`, `api_id`, `deposit_id`, `address`, `hold_amount`, `time_insert`, `time_expiring`, `purpose`)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """
+                await cur.execute(sql, (coin_name, api_id, deposit_id, address, amount, int(time.time()), time_expiring, purpose))
+                await conn.commit()
+                return True
+    except Exception:
+        traceback.print_exc(file=sys.stdout)
+    return False
+
+async def delete_hold_address():
+    global pool
+    try:
+        await open_connection()
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                sql = """
+                DELETE FROM `balance_holds` WHERE `time_expiring`<UNIX_TIMESTAMP()
+                """
+                await cur.execute(sql,)
+                await conn.commit()
+                return True
+    except Exception:
+        traceback.print_exc(file=sys.stdout)
+    return False
+
 async def insert_api_log(api_id: int, method: str, data: str, result: str):
     global pool
     try:
@@ -1296,6 +1329,13 @@ class BackgroundRunner:
                 traceback.print_exc(file=sys.stdout)
             await asyncio.sleep(timer)
 
+    async def bg_amount_holding(self, timer: float=30.0):
+        while True:
+            try:
+                await delete_hold_address()
+            except Exception:
+                traceback.print_exc(file=sys.stdout)
+            await asyncio.sleep(timer)
 
 runner = BackgroundRunner(app)
 
@@ -1340,6 +1380,7 @@ async def app_startup():
     asyncio.create_task(runner.update_balance_wrkz(timer=10.0))
     asyncio.create_task(runner.unlock_deposit(timer=10.0))
     asyncio.create_task(runner.bg_reload_coin_settings(timer=10.0))
+    asyncio.create_task(runner.bg_amount_holding(timer=30.0))
 # End of background
 
 @app.get("/reload", include_in_schema=False)
@@ -1785,7 +1826,8 @@ async def get_a_balance(
                     "data": {
                         "coin": coin_name,
                         "address": address,
-                        "balance": round_amount(get_balance['total_deposited'] + get_balance['total_received'] - get_balance['total_sent'] - get_balance['total_withdrew'], round_places),
+                        "balance": round_amount(get_balance['total_deposited'] + get_balance['total_received'] - get_balance['total_sent'] - get_balance['total_withdrew'] - get_balance['amount_hold'], round_places),
+                        "amount_hold": get_balance['amount_hold'], 
                         "deposit": round_amount(get_balance['total_deposited'], round_places),
                         "withdrew": round_amount(get_balance['total_withdrew'], round_places),
                         "received": round_amount(get_balance['total_received'], round_places),
@@ -1984,7 +2026,7 @@ async def withdraw_coin(
                             round_places = runner.coin_list[coin_name]['round_places']
                             tx_fee = runner.coin_list[coin_name]['fee_withdraw']
                             has_pos = runner.coin_list[coin_name]['has_pos']
-                            balance = round_amount(get_balance['total_deposited'] + get_balance['total_received'] - get_balance['total_sent'] - get_balance['total_withdrew'], round_places)
+                            balance = round_amount(get_balance['total_deposited'] + get_balance['total_received'] - get_balance['total_sent'] - get_balance['total_withdrew'] - get_balance['amount_hold'], round_places)
                             if amount + tx_fee > balance:
                                 failed_result = {
                                     "success": False,
@@ -2188,6 +2230,12 @@ async def transfer_balances(
                 ea_error = False
                 try:
                     coin_name = ea.coin.upper()
+                    # check permission
+                    if get_api['id'] != runner.by_key["{}_{}".format(coin_name, ea.from_address)]['api_id']:
+                        has_error = True
+                        ea_error = True
+                        error_list.append("{}/address: {} is not within your API!".format(coin_name, ea.from_address))
+
                     if coin_name not in runner.coin_list.keys():
                         has_error = True
                         ea_error = True
@@ -2906,6 +2954,179 @@ async def list_addresses(
                 }
                 await insert_api_log(get_api['id'], method_call, data_call, json.dumps(result_data))
                 return result_data
+
+
+class hold_balance_coin(BaseModel):
+    coin: str
+    address: str
+    amount: float
+    expiring: int = 3600
+    purpose: str = None
+
+@app.post("/hold_alance")
+async def hold_a_balance(
+    request: Request, item: hold_balance_coin, Authorization: Union[str, None] = Header(default=None)
+):
+    """
+    Hold a balance of an address of a coin
+
+    item: {coin, address, amount}
+    """
+    method_call = "/hold_balance"
+    coin_name = item.coin.upper()
+    address = item.address
+    if runner.coin_list is None or len(runner.coin_list) == 0:
+        return {
+            "success": False,
+            "data": None,
+            "message": "internal error.",
+            "time": int(time.time())
+        }
+    if coin_name not in runner.coin_list.keys():
+        return {
+            "success": False,
+            "data": None,
+            "message": "coin {} not in the supported list!".format(coin_name),
+            "time": int(time.time())
+        }
+    else:
+        if 'Authorization' not in request.headers:
+            return {
+                "success": False,
+                "data": None,
+                "message": "You need Authorization key in header!",
+                "time": int(time.time())
+            }
+        else:
+            # get who own that key
+            get_api = await get_api_by_key(request.headers['Authorization'])
+            if get_api is None:
+                return {
+                    "success": False,
+                    "data": None,
+                    "message": "Wrong API key!",
+                    "time": int(time.time())
+                }
+            elif get_api['is_suspended'] != 0:
+                return {
+                    "success": False,
+                    "data": None,
+                    "message": "We suspended your API key, please contact us!",
+                    "time": int(time.time())
+                }
+
+            if get_api['id'] != runner.by_key["{}_{}".format(coin_name, item.address)]['api_id']:
+                failed_result = {
+                    "success": False,
+                    "data": None,
+                    "message": "{}, address {}.. permission denied.".format(coin_name, item.address),
+                    "time": int(time.time())
+                }
+                try:
+                    await insert_api_failed_log(get_api['id'], method_call, str(item), json.dumps(failed_result))
+                except Exception:
+                    traceback.print_exc(file=sys.stdout) 
+                return failed_result
+
+            get_balance = await get_balance_coin_address(
+                get_api['id'], coin_name, address
+            )
+            if get_balance is None:
+                failed_result = {
+                    "success": False,
+                    "data": None,
+                    "message": "{}, address not found {}!".format(coin_name, address),
+                    "time": int(time.time())
+                }
+                try:
+                    await insert_api_failed_log(get_api['id'], method_call, str(item), json.dumps(failed_result))
+                except Exception:
+                    traceback.print_exc(file=sys.stdout) 
+                return failed_result
+            else:
+                if item.amount < 0:
+                    failed_result = {
+                        "success": False,
+                        "data": None,
+                        "message": "{}, invalid amount {}!".format(coin_name, item.amount),
+                        "time": int(time.time())
+                    }
+                    try:
+                        await insert_api_failed_log(get_api['id'], method_call, str(item), json.dumps(failed_result))
+                    except Exception:
+                        traceback.print_exc(file=sys.stdout) 
+                    return failed_result
+                
+                round_places = runner.coin_list[coin_name]['round_places']
+                balance = round_amount(get_balance['total_deposited'] + get_balance['total_received'] - get_balance['total_sent'] - get_balance['total_withdrew'] - get_balance['amount_hold'], round_places)
+                hold_amount = round_amount(item.amount, round_places)
+                purpose = ""
+                if hasattr(item, "purpose") and len(item.purpose) > 256:
+                    purpose = item.purpose.strip()[0:255]
+                elif hasattr(item, "purpose") and len(item.purpose) > 0:
+                    purpose = item.purpose.strip()
+                if hasattr(item, "expiring") and item.expiring > 30*24*3600:
+                    expiring = 30*24*3600
+                elif hasattr(item, "expiring") and item.expiring <= 30:
+                    expiring = 30
+                if hold_amount > balance:
+                    failed_result = {
+                        "success": False,
+                        "data": None,
+                        "message": "{}, insufficient balance to hold amount {}! Having {}!".format(coin_name, hold_amount, balance),
+                        "time": int(time.time())
+                    }
+                    try:
+                        await insert_api_failed_log(get_api['id'], method_call, str(item), json.dumps(failed_result))
+                    except Exception:
+                        traceback.print_exc(file=sys.stdout)
+                    try:
+                        await log_to_discord(
+                            "🔴 API: {} / {} - trying to hold {} {} but having {} {}.".format(get_api['id'], item.address, hold_amount, coin_name, balance, coin_name),
+                            config['log']['discord_webhook_default']
+                        )
+                    except Exception:
+                        traceback.print_exc(file=sys.stdout)
+                    return failed_result
+                holding = await insert_hold_address(
+                    coin_name, get_api['id'], runner.by_key["{}_{}".format(coin_name, item.address)]['id'], item.address,
+                    hold_amount, int(time.time()) + expiring, item.purpose
+                )
+                if holding is True:
+                    data_call = json.dumps({"coin": coin_name, "address": address, "hold_balance": hold_amount, "expiring": int(time.time()) + expiring, "purpose": purpose})
+                    result_data = {
+                        "success": True,
+                        "data": {
+                            "coin": coin_name,
+                            "address": address,
+                            "hold_amount": hold_amount,
+                            "expiring": int(time.time()) + expiring,
+                            "purpose": purpose
+                        },
+                        "message": None,
+                        "time": int(time.time())
+                    }
+                    await insert_api_log(get_api['id'], method_call, data_call, json.dumps(result_data))
+                    try:
+                        await log_to_discord(
+                            "🗃️ API: {} / {} - HOLDING {} {} and expiring: <t:{}:f>.".format(get_api['id'], item.address, hold_amount, coin_name, int(time.time()) + expiring),
+                            config['log']['discord_webhook_default']
+                        )
+                    except Exception:
+                        traceback.print_exc(file=sys.stdout)
+                    return result_data
+                else:
+                    failed_result = {
+                        "success": False,
+                        "data": None,
+                        "message": "{}, internal error for holding {} of address {}".format(coin_name, hold_amount, item.address),
+                        "time": int(time.time())
+                    }
+                    try:
+                        await insert_api_failed_log(get_api['id'], method_call, str(item), json.dumps(failed_result))
+                    except Exception:
+                        traceback.print_exc(file=sys.stdout) 
+                    return failed_result
 
 if __name__ == "__main__":
     uvicorn.run(
