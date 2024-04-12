@@ -21,9 +21,18 @@ import asyncio
 import sys, traceback
 import math
 from asyncio import get_event_loop
+import argparse
 from config import load_config
 
-config = load_config()
+parser = argparse.ArgumentParser()
+
+parser.add_argument('--config', dest='config', type=str, help='Pass the configuration toml file (example: wow_tipbot.toml)')
+args = parser.parse_args()
+if not args.config:
+    print("Please set --config")
+    sys.exit()
+
+config = load_config(args.config)
 
 SERVER_BOT = "TELEGRAM"
 API_TOKEN = config['telegram']['token']
