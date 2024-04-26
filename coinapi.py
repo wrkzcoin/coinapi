@@ -211,17 +211,51 @@ async def transfer_records(
         traceback.print_exc(file=sys.stdout)
     return False
 
-async def insert_hold_address(coin_name: str, api_id: int, deposit_id: int, address: str, amount: float, time_expiring: int, purpose: str):
+async def insert_hold_address(coin_name: str, api_id: int, deposit_id: int, address: str, amount: float, time_expiring: int, purpose: str, ref: str):
     global pool
     try:
         await open_connection()
         async with pool.acquire() as conn:
             async with conn.cursor() as cur:
                 sql = """
-                INSERT INTO `balance_holds` (`coin_name`, `api_id`, `deposit_id`, `address`, `hold_amount`, `time_insert`, `time_expiring`, `purpose`)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO `balance_holds` (`coin_name`, `api_id`, `deposit_id`, `address`, `hold_amount`, `time_insert`, `time_expiring`, `purpose`, `ref`)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """
-                await cur.execute(sql, (coin_name, api_id, deposit_id, address, amount, int(time.time()), time_expiring, purpose))
+                await cur.execute(sql, (coin_name, api_id, deposit_id, address, amount, int(time.time()), time_expiring, purpose, ref))
+                await conn.commit()
+                return True
+    except Exception:
+        traceback.print_exc(file=sys.stdout)
+    return False
+
+async def get_hold_balance_by_ref(coin_name: str, ref: str):
+    global pool
+    try:
+        await open_connection()
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                sql = """
+                SELECT * FROM `balance_holds` 
+                WHERE `coin_name`=%s AND `ref`=%s LIMIT 1;
+                """
+                await cur.execute(sql, (coin_name, ref))
+                result = await cur.fetchone()
+                if result:
+                    return result
+    except Exception as e:
+        traceback.print_exc(file=sys.stdout)
+    return None
+
+async def unhold_balance_address(coin_name: str, ref: str):
+    global pool
+    try:
+        await open_connection()
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                sql = """
+                DELETE FROM `balance_holds` WHERE `coin_name`=%s AND `ref`=%s
+                """
+                await cur.execute(sql, (coin_name, ref))
                 await conn.commit()
                 return True
     except Exception:
@@ -693,9 +727,9 @@ class BackgroundRunner:
         try:
             if self.pool is None:
                 self.pool = await aiomysql.create_pool(
-                    host=config['mysql']['host'], port=3306, minsize=4, maxsize=8,
-                    user=config['mysql']['user'], password=config['mysql']['password'],
-                    db=config['mysql']['db'], cursorclass=DictCursor, autocommit=True
+                    host=self.config['mysql']['host'], port=3306, minsize=4, maxsize=8,
+                    user=self.config['mysql']['user'], password=self.config['mysql']['password'],
+                    db=self.config['mysql']['db'], cursorclass=DictCursor, autocommit=True
                 )
         except:
             print("ERROR: Unexpected error: Could not connect to MySql instance.")
@@ -905,9 +939,9 @@ class BackgroundRunner:
     async def update_balance_xmr(self, timer: float=10.0):
         while True:
             try:
-                if len(config['coinapi']['list_bcn_xmr']) > 0:
+                if len(self.config['coinapi']['list_bcn_xmr']) > 0:
                     tasks = []
-                    for coin_name in config['coinapi']['list_bcn_xmr']:
+                    for coin_name in self.config['coinapi']['list_bcn_xmr']:
                         if runner.coin_list.get(coin_name) is not None:
                             tasks.append(self.update_balance_tasks_xmr(coin_name, False))
                     completed = 0
@@ -1169,10 +1203,10 @@ class BackgroundRunner:
 
     async def update_balance_btc(self, timer: float=10.0):
         while True:
-            if len(config['coinapi']['list_btc']) > 0:
+            if len(self.config['coinapi']['list_btc']) > 0:
                 try:
                     tasks = []
-                    for coin_name in config['coinapi']['list_btc']:
+                    for coin_name in self.config['coinapi']['list_btc']:
                         tasks.append(self.update_balance_tasks_btc(coin_name, False))
                     completed = 0
                     for task in asyncio.as_completed(tasks):
@@ -1266,7 +1300,7 @@ class BackgroundRunner:
                                             try:
                                                 await log_to_discord(
                                                     "API: {} / ⏳ PENDING DEPOSIT {} {} to {}. Tx: {}".format(app_id, float(tx['amount']), coin_name, tx['address'], tx['txid']),
-                                                    config['log']['discord_webhook_default']
+                                                    self.config['log']['discord_webhook_default']
                                                 )
                                             except Exception:
                                                 traceback.print_exc(file=sys.stdout) 
@@ -1310,7 +1344,7 @@ class BackgroundRunner:
                                         try:
                                             await log_to_discord(
                                                 "API: {} / ✅ UNLOCKED {} {} to {}. Tx: {}".format(ea['api_id'], ea['amount'], ea['coin_name'], ea['address'], ea['txid']),
-                                                config['log']['discord_webhook_default']
+                                                self.config['log']['discord_webhook_default']
                                             )
                                         except Exception:
                                             traceback.print_exc(file=sys.stdout) 
@@ -1380,7 +1414,7 @@ async def app_startup():
     asyncio.create_task(runner.update_balance_wrkz(timer=10.0))
     asyncio.create_task(runner.unlock_deposit(timer=10.0))
     asyncio.create_task(runner.bg_reload_coin_settings(timer=10.0))
-    asyncio.create_task(runner.bg_amount_holding(timer=30.0))
+    asyncio.create_task(runner.bg_amount_holding(timer=10.0))
 # End of background
 
 @app.get("/reload", include_in_schema=False)
@@ -1409,6 +1443,8 @@ async def reload_configuration(
                 "time": int(time.time())
             }
         else:
+            runner.coin_list = await get_coin_setting()
+            config = load_config()
             print_color(f"{datetime.now():%Y-%m-%d %H:%M:%S} reloaded configuration done!", color="yellow")
             try:
                 await log_to_discord(
@@ -2963,7 +2999,7 @@ class hold_balance_coin(BaseModel):
     expiring: int = 3600
     purpose: str = None
 
-@app.post("/hold_alance")
+@app.post("/hold_balance")
 async def hold_a_balance(
     request: Request, item: hold_balance_coin, Authorization: Union[str, None] = Header(default=None)
 ):
@@ -3061,14 +3097,15 @@ async def hold_a_balance(
                 balance = round_amount(get_balance['total_deposited'] + get_balance['total_received'] - get_balance['total_sent'] - get_balance['total_withdrew'] - get_balance['amount_hold'], round_places)
                 hold_amount = round_amount(item.amount, round_places)
                 purpose = ""
+                expiring = item.expiring
                 if hasattr(item, "purpose") and len(item.purpose) > 256:
                     purpose = item.purpose.strip()[0:255]
                 elif hasattr(item, "purpose") and len(item.purpose) > 0:
                     purpose = item.purpose.strip()
                 if hasattr(item, "expiring") and item.expiring > 30*24*3600:
                     expiring = 30*24*3600
-                elif hasattr(item, "expiring") and item.expiring <= 30:
-                    expiring = 30
+                elif hasattr(item, "expiring") and item.expiring <= 5:
+                    expiring = 5
                 if hold_amount > balance:
                     failed_result = {
                         "success": False,
@@ -3088,9 +3125,10 @@ async def hold_a_balance(
                     except Exception:
                         traceback.print_exc(file=sys.stdout)
                     return failed_result
+                ref = str(uuid.uuid4())
                 holding = await insert_hold_address(
                     coin_name, get_api['id'], runner.by_key["{}_{}".format(coin_name, item.address)]['id'], item.address,
-                    hold_amount, int(time.time()) + expiring, item.purpose
+                    hold_amount, int(time.time()) + expiring, item.purpose, ref
                 )
                 if holding is True:
                     data_call = json.dumps({"coin": coin_name, "address": address, "hold_balance": hold_amount, "expiring": int(time.time()) + expiring, "purpose": purpose})
@@ -3101,7 +3139,8 @@ async def hold_a_balance(
                             "address": address,
                             "hold_amount": hold_amount,
                             "expiring": int(time.time()) + expiring,
-                            "purpose": purpose
+                            "purpose": purpose,
+                            "ref": ref
                         },
                         "message": None,
                         "time": int(time.time())
@@ -3109,7 +3148,7 @@ async def hold_a_balance(
                     await insert_api_log(get_api['id'], method_call, data_call, json.dumps(result_data))
                     try:
                         await log_to_discord(
-                            "🗃️ API: {} / {} - HOLDING {} {} and expiring: <t:{}:f>.".format(get_api['id'], item.address, hold_amount, coin_name, int(time.time()) + expiring),
+                            "🗃️ API: {} / {} - HOLDING {} {} and expiring: <t:{}:f>. Ref: {}".format(get_api['id'], item.address, hold_amount, coin_name, int(time.time()) + expiring, ref),
                             config['log']['discord_webhook_default']
                         )
                     except Exception:
@@ -3127,6 +3166,121 @@ async def hold_a_balance(
                     except Exception:
                         traceback.print_exc(file=sys.stdout) 
                     return failed_result
+
+class unhold_balance_coin(BaseModel):
+    coin: str
+    ref: str
+
+@app.post("/unhold_balance")
+async def unhold_a_balance(
+    request: Request, item: unhold_balance_coin, Authorization: Union[str, None] = Header(default=None)
+):
+    """
+    Hold a balance of an address of a coin
+
+    item: {coin, ref}
+    """
+    method_call = "/unhold_balance"
+    coin_name = item.coin.upper()
+    if runner.coin_list is None or len(runner.coin_list) == 0:
+        return {
+            "success": False,
+            "data": None,
+            "message": "internal error.",
+            "time": int(time.time())
+        }
+    if coin_name not in runner.coin_list.keys():
+        return {
+            "success": False,
+            "data": None,
+            "message": "coin {} not in the supported list!".format(coin_name),
+            "time": int(time.time())
+        }
+    else:
+        if 'Authorization' not in request.headers:
+            return {
+                "success": False,
+                "data": None,
+                "message": "You need Authorization key in header!",
+                "time": int(time.time())
+            }
+        else:
+            # get who own that key
+            get_api = await get_api_by_key(request.headers['Authorization'])
+            if get_api is None:
+                return {
+                    "success": False,
+                    "data": None,
+                    "message": "Wrong API key!",
+                    "time": int(time.time())
+                }
+            elif get_api['is_suspended'] != 0:
+                return {
+                    "success": False,
+                    "data": None,
+                    "message": "We suspended your API key, please contact us!",
+                    "time": int(time.time())
+                }
+
+            ref = item.ref
+            get_hold_by_ref = await get_hold_balance_by_ref(coin_name, ref)
+            if get_hold_by_ref is None:
+                failed_result = {
+                    "success": False,
+                    "data": None,
+                    "message": "{}, ref {} not found.".format(coin_name, ref),
+                    "time": int(time.time())
+                }
+                try:
+                    await insert_api_failed_log(get_api['id'], method_call, str(item), json.dumps(failed_result))
+                except Exception:
+                    traceback.print_exc(file=sys.stdout) 
+                return failed_result
+            elif get_api['id'] != get_hold_by_ref['api_id']:
+                failed_result = {
+                    "success": False,
+                    "data": None,
+                    "message": "{}, unhold ref {}.. permission denied.".format(coin_name, ref),
+                    "time": int(time.time())
+                }
+                try:
+                    await insert_api_failed_log(get_api['id'], method_call, str(item), json.dumps(failed_result))
+                except Exception:
+                    traceback.print_exc(file=sys.stdout) 
+                return failed_result
+
+            unhold = await unhold_balance_address(
+                coin_name, ref
+            )
+            if unhold is True:
+                data_call = json.dumps({"coin": coin_name, "ref": ref})
+                result_data = {
+                    "success": True,
+                    "data": ref,
+                    "message": None,
+                    "time": int(time.time())
+                }
+                await insert_api_log(get_api['id'], method_call, data_call, json.dumps(result_data))
+                try:
+                    await log_to_discord(
+                        "🗃️ API: {} UNHOLD ref: {}".format(get_api['id'], ref),
+                        config['log']['discord_webhook_default']
+                    )
+                except Exception:
+                    traceback.print_exc(file=sys.stdout)
+                return result_data
+            else:
+                failed_result = {
+                    "success": False,
+                    "data": None,
+                    "message": "{}, internal error for holding ref: {}".format(coin_name, ref),
+                    "time": int(time.time())
+                }
+                try:
+                    await insert_api_failed_log(get_api['id'], method_call, str(item), json.dumps(failed_result))
+                except Exception:
+                    traceback.print_exc(file=sys.stdout) 
+                return failed_result
 
 if __name__ == "__main__":
     uvicorn.run(
